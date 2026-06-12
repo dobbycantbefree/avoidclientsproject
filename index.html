@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
-<title>스페셜 지뢰찾기</title>
+<title>광고주 피하기 프로젝트</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Poppins:wght@500;600;700;800&family=Stylish&display=swap" rel="stylesheet">
@@ -245,6 +245,18 @@
     cursor:default;
   }
   .cell.flag{ background: var(--accent); }
+  .cell.pressing{
+    transform: scale(0.92);
+    filter: brightness(0.85);
+    transition: transform .15s linear, filter .15s linear;
+  }
+  .cell.flag-confirmed{
+    animation: flagPulse .2s ease;
+  }
+  @keyframes flagPulse{
+    0%{ transform: scale(1.15); }
+    100%{ transform: scale(1); }
+  }
   .cell.mine-special.open{
     background: var(--accent2);
   }
@@ -812,6 +824,7 @@
     </div>
 
     <button id="playAgainBtn">다시 도전</button>
+    <button id="goHomeBtn" style="background:var(--accent);">🏠 홈으로</button>
   </div>
 </div>
 
@@ -892,6 +905,7 @@
   let openedCount = 0;
   let totalCells = 0;
   let lockedClicks = false; // for 404 / call lockout
+  let gameEpoch = 0; // incremented on reset; used to cancel stale effect timeouts
   let isPaused = false;
   let firstClickDone = false;
 
@@ -1066,6 +1080,12 @@ const GHOST_PHOTOS = [
     endOverlay.classList.remove('show');
     initGame();
   });
+  document.getElementById('goHomeBtn').addEventListener('click', ()=>{
+    endOverlay.classList.remove('show');
+    if(timerId) clearInterval(timerId);
+    gameEl.style.display = 'none';
+    setupEl.style.display = 'flex';
+  });
 
   digModeBtn.addEventListener('click', ()=>{
     mode='dig';
@@ -1090,10 +1110,23 @@ const GHOST_PHOTOS = [
   });
 
   // ---------- Game init ----------
+  function cancelAllEffects(){
+    // Hide every effect overlay/element so a reset mid-effect stops it visually
+    ['effect-nuke','effect-404','effect-random','effect-update','effect-call'].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el) el.classList.remove('show');
+    });
+    const centerPopupEl = document.getElementById('centerPopup');
+    if(centerPopupEl) centerPopupEl.classList.remove('show');
+    document.querySelectorAll('.ghost').forEach(g=> g.remove());
+  }
+
   function initGame(){
+    gameEpoch++;
+    cancelAllEffects();
+    lockedClicks = false;
     clearInterval(timerId);
     gameActive = true;
-    lockedClicks = false;
     isPaused = false;
     document.getElementById('pauseOverlay').classList.remove('show');
     firstClickDone = false;
@@ -1218,15 +1251,20 @@ const GHOST_PHOTOS = [
         let pressTimer=null;
         let longPressFired=false;
         let touchStartX=0, touchStartY=0;
+        const LONG_PRESS_MS = 350;
         cell.addEventListener('touchstart', (e)=>{
           longPressFired=false;
           const t = e.touches[0];
           touchStartX = t.clientX; touchStartY = t.clientY;
+          cell.classList.add('pressing');
           pressTimer = setTimeout(()=>{
             toggleFlag(x,y);
             longPressFired=true;
+            cell.classList.remove('pressing');
+            cell.classList.add('flag-confirmed');
+            setTimeout(()=> cell.classList.remove('flag-confirmed'), 200);
             if(navigator.vibrate) navigator.vibrate(15);
-          }, 480);
+          }, LONG_PRESS_MS);
         }, {passive:true});
         cell.addEventListener('touchmove', (e)=>{
           const t = e.touches[0];
@@ -1234,10 +1272,12 @@ const GHOST_PHOTOS = [
           const dy = Math.abs(t.clientY - touchStartY);
           if(dx > 10 || dy > 10){
             if(pressTimer){ clearTimeout(pressTimer); pressTimer=null; }
+            cell.classList.remove('pressing');
           }
         }, {passive:true});
         cell.addEventListener('touchend', (e)=>{
           if(pressTimer) clearTimeout(pressTimer);
+          cell.classList.remove('pressing');
           if(longPressFired){
             e.preventDefault();
             return;
@@ -1245,6 +1285,10 @@ const GHOST_PHOTOS = [
           // treat as a tap -> trigger normal click behavior
           e.preventDefault();
           onCellClick({currentTarget: cell});
+        });
+        cell.addEventListener('touchcancel', ()=>{
+          if(pressTimer) clearTimeout(pressTimer);
+          cell.classList.remove('pressing');
         });
         boardEl.appendChild(cell);
       }
@@ -1375,6 +1419,9 @@ const GHOST_PHOTOS = [
       return;
     }
 
+    const isFirst = isPlayerClick && !firstClickDone;
+    if(isPlayerClick) firstClickDone = true;
+
     if(data.count===0){
       // flood fill
       refreshBoardDisplay();
@@ -1387,6 +1434,16 @@ const GHOST_PHOTOS = [
     } else {
       refreshBoardDisplay();
       updateHUD();
+      if(isFirst){
+        // first click landed on a numbered (non-zero) cell: open a small
+        // starter cluster of safe neighboring cells so the opening turn
+        // reveals more than a single tile
+        forEachNeighbor(x,y,(nx,ny)=>{
+          if(!revealed[ny][nx] && !flagged[ny][nx] && !board[ny][nx].mine){
+            revealCell(nx,ny,false);
+          }
+        });
+      }
     }
     checkWin();
   }
@@ -1436,28 +1493,33 @@ const GHOST_PHOTOS = [
 
   // ---------- Special effects ----------
   function triggerSpecialEffect(type, x, y){
+    const epoch = gameEpoch;
+    if(epoch !== gameEpoch) return;
     switch(type){
-      case 'domino': effectDomino(x,y); break;
-      case 'random': effectRandom(); break;
-      case 'ghost': effectGhost(); break;
-      case 'blur': effectBlur(); break;
-      case 'call': effectCall(x,y); break;
-      case 'update': effectUpdate(); break;
-      case '404': effect404(); break;
-      case 'nuke': effectNuke(); break;
+      case 'domino': effectDomino(x,y,epoch); break;
+      case 'random': effectRandom(epoch); break;
+      case 'ghost': effectGhost(epoch); break;
+      case 'blur': effectBlur(epoch); break;
+      case 'call': effectCall(x,y,epoch); break;
+      case 'update': effectUpdate(epoch); break;
+      case '404': effect404(epoch); break;
+      case 'nuke': effectNuke(epoch); break;
     }
   }
 
   // 도미노: 인접 2칸 범위 자동 오픈, 연쇄 가능
-  function effectDomino(x,y){
+  function effectDomino(x,y,epoch){
     showToast('🟣 보고 결과 도미노 효과가 발동했다!');
     let neighbors = [];
-    forEachNeighborRange(x,y,2,(nx,ny)=>{
+    forEachNeighborRange(x,y,1,(nx,ny)=>{
       if(!revealed[ny][nx] && !flagged[ny][nx]) neighbors.push([nx,ny]);
     });
     let extraTime = 0;
+    let chainedEffects = 0;
+    const MAX_CHAINED_EFFECTS = 2;
     let i=0;
     function step(){
+      if(epoch !== gameEpoch) return;
       if(i>=neighbors.length){
         if(extraTime !== 0) adjustTime(extraTime, '도미노 연쇄 결과');
         checkWin();
@@ -1473,9 +1535,14 @@ const GHOST_PHOTOS = [
       const ndata = board[ny][nx];
       if(ndata.mine){
         if(ndata.special){
-          extraTime -= 5;
-          // also trigger nested effect after a short delay (avoid infinite stacking visuals)
-          setTimeout(()=> triggerSpecialEffect(ndata.special, nx, ny), 700);
+          if(chainedEffects < MAX_CHAINED_EFFECTS){
+            chainedEffects++;
+            extraTime -= 5;
+            // also trigger nested effect after a short delay (avoid infinite stacking visuals)
+            setTimeout(()=>{ if(epoch === gameEpoch) triggerSpecialEffect(ndata.special, nx, ny); }, 700);
+          } else {
+            extraTime -= 5;
+          }
         } else {
           extraTime -= 8;
         }
@@ -1485,9 +1552,9 @@ const GHOST_PHOTOS = [
     setTimeout(step, 300);
   }
 
-  // 랜덤: 50/50 +-10초
-  function effectRandom(){
-    const win = Math.random() < 0.5;
+  // 랜덤: 행운 65% (+10초) / 불행 35% (-15초)
+  function effectRandom(epoch){
+    const win = Math.random() < 0.65;
     const overlay = document.getElementById('effect-random');
     const titleEl = document.getElementById('randomTitle');
     const msgEl = document.getElementById('randomMsg');
@@ -1504,16 +1571,16 @@ const GHOST_PHOTOS = [
     } else {
       titleEl.textContent = '불운 😞';
       msgEl.textContent = '다시 고민해 주셔야 할 것 같아요.';
-      timeEl.textContent = '-10초';
+      timeEl.textContent = '-15초';
       timeEl.className = 'rand-time minus';
-      adjustTime(-10, null);
+      adjustTime(-15, null);
     }
     overlay.classList.add('show');
-    setTimeout(()=> overlay.classList.remove('show'), 1100);
+    setTimeout(()=>{ if(epoch === gameEpoch) overlay.classList.remove('show'); }, 1100);
   }
 
   // 고향: 귀신 등장, 커서 따라다니며 방해
-  function effectGhost(){
+  function effectGhost(epoch){
     showToast('👻 귀신 출몰!', 2200);
     const ghost = document.createElement('div');
     ghost.className='ghost';
@@ -1545,7 +1612,7 @@ const GHOST_PHOTOS = [
 
     // random jitter even without movement
     const jitter = setInterval(()=>{
-      if(!active) return;
+      if(!active || epoch !== gameEpoch) return;
       moveTo(lastX + (Math.random()*40-20), lastY + (Math.random()*40-20));
     }, 600);
 
@@ -1562,14 +1629,14 @@ const GHOST_PHOTOS = [
   }
 
   // 시야흐림
-  function effectBlur(){
+  function effectBlur(epoch){
     showToast('🌫️ 6초간 시야가 흐려집니다...', 2000);
     boardEl.classList.add('blurred');
-    setTimeout(()=> boardEl.classList.remove('blurred'), 6000);
+    setTimeout(()=>{ if(epoch === gameEpoch) boardEl.classList.remove('blurred'); }, 6000);
   }
 
   // 통화연결원: 클릭칸은 정상 오픈됨(이미 처리됨), 잠시 대기 후 랜덤 칸 추가 오픈
-  function effectCall(x,y){
+  function effectCall(x,y,epoch){
     lockedClicks = true;
     const callEl = document.getElementById('effect-call');
     document.getElementById('callMsg').innerHTML = '아, 잠시만요~<br>담당 프로님 바꿔드릴게요~ ☎️';
@@ -1577,6 +1644,7 @@ const GHOST_PHOTOS = [
     adjustTime(-2, null);
 
     setTimeout(()=>{
+      if(epoch !== gameEpoch) return;
       callEl.classList.remove('show');
       lockedClicks = false;
       // pick random unrevealed, unflagged cell
@@ -1594,18 +1662,20 @@ const GHOST_PHOTOS = [
         targetEl.classList.add('toss-target');
         drawTossLine(sourceEl, targetEl);
         setTimeout(()=>{
+          if(epoch !== gameEpoch) return;
           els[ry*W+rx].classList.add('domino-flash');
           revealCell(rx,ry,false);
           const rdata = board[ry][rx];
           if(rdata.mine){
             if(rdata.special){
-              setTimeout(()=> triggerSpecialEffect(rdata.special, rx, ry), 700);
+              setTimeout(()=>{ if(epoch === gameEpoch) triggerSpecialEffect(rdata.special, rx, ry); }, 700);
             } else {
               adjustTime(-8, '대신 열린 칸이 지뢰였네요');
             }
           }
           checkWin();
           setTimeout(()=>{
+            if(epoch !== gameEpoch) return;
             sourceEl.classList.remove('toss-source');
             targetEl.classList.remove('toss-target');
             hideTossLine();
@@ -1632,7 +1702,7 @@ const GHOST_PHOTOS = [
   }
 
   // 업데이트: 헛된 진행바
-  function effectUpdate(){
+  function effectUpdate(epoch){
     lockedClicks = true;
     const overlay = document.getElementById('effect-update');
     const bar = document.getElementById('barUpdate');
@@ -1651,6 +1721,7 @@ const GHOST_PHOTOS = [
     const stepMs = 80;
     const inc = 100 / (totalMs/stepMs);
     const iv = setInterval(()=>{
+      if(epoch !== gameEpoch){ clearInterval(iv); return; }
       progress += inc;
       if(progress>=100){
         progress=100;
@@ -1661,6 +1732,7 @@ const GHOST_PHOTOS = [
         changedEl.textContent='업데이트된 항목: 0';
         subEl.textContent = '';
         setTimeout(()=>{
+          if(epoch !== gameEpoch) return;
           overlay.classList.remove('show');
           lockedClicks = false;
         }, 1200);
@@ -1673,7 +1745,7 @@ const GHOST_PHOTOS = [
 
   // 404: 풀스크린 에러, 10초
   // 핵폭발: 연출 후 보드 리셋 (시간 유지)
-  function effectNuke(){
+  function effectNuke(epoch){
     lockedClicks = true;
     gameActive = false;
     clearInterval(timerId);
@@ -1689,6 +1761,7 @@ const GHOST_PHOTOS = [
     el.classList.add('show');
 
     setTimeout(()=>{
+      if(epoch !== gameEpoch){ el.classList.remove('show'); return; }
       el.classList.remove('show');
       // reset board, keep timeLeft
       const savedTime = timeLeft;
@@ -1700,10 +1773,11 @@ const GHOST_PHOTOS = [
   }
 
   // 폭풍의 도둑: "제가 다시 검토 좀 하고 직접 마무리하겠습니다~" 팝업(중앙) - 사라짐 - 열린 칸 6개 순차적으로 다시 닫음
-  function effect404(){
+  function effect404(epoch){
     lockedClicks = true;
 
     showCenterPopup('🌪️ 제가 다시 검토 좀 하고 직접 마무리하겠습니다~', 1400, ()=>{
+      if(epoch !== gameEpoch) return;
       // collect all currently-open cells (mines and numbers alike)
       let openCells = [];
       for(let y=0;y<H;y++) for(let x=0;x<W;x++){
@@ -1714,6 +1788,7 @@ const GHOST_PHOTOS = [
 
       let i=0;
       function closeNext(){
+        if(epoch !== gameEpoch) return;
         if(i>=targets.length){
           lockedClicks = false;
           return;
@@ -1725,6 +1800,7 @@ const GHOST_PHOTOS = [
         const el = els[idx];
         el.classList.add('storm-close');
         setTimeout(()=>{
+          if(epoch !== gameEpoch) return;
           revealed[ty][tx] = false;
           el.dataset.rendered = '';
           el.classList.remove('storm-close');
